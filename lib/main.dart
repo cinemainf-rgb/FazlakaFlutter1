@@ -14,6 +14,22 @@ void main() => runApp(const FazlakaApp());
 const petrol = Color(0xFF0A3D3E);
 const bgColor = Color(0xFFDFF5F2);
 
+int parseTime(String s) {
+  if (s.isEmpty) return 0;
+  int total = 0;
+  final reg = RegExp(r'(\d+)([dhms])');
+  for (final m in reg.allMatches(s)) {
+    final v = int.tryParse(m.group(1) ?? '0') ?? 0;
+    final u = m.group(2);
+    if (u == 'd') total += v * 86400;
+    if (u == 'h') total += v * 3600;
+    if (u == 'm') total += v * 60;
+    if (u == 's') total += v;
+  }
+  if (total == 0) total = int.tryParse(s) ?? 0;
+  return total;
+}
+
 class MikroTikApi {
   Socket? _socket;
   List<int> _buf = [];
@@ -98,6 +114,59 @@ class MikroTikApi {
     }
     return null;
   }
+}
+
+bool isExpired(Map<String,String> u) {
+  final limitTime = u['limit-uptime'] ?? '';
+  final up = u['uptime'] ?? '';
+  if (limitTime.isNotEmpty) {
+    final limitSec = parseTime(limitTime);
+    final upSec = parseTime(up);
+    if (limitSec > 0 && upSec >= limitSec) return true;
+  }
+  final limitBytesStr = u['limit-bytes-total'] ?? '';
+  if (limitBytesStr.isNotEmpty) {
+    final limitBytes = int.tryParse(limitBytesStr) ?? 0;
+    final inBytes = int.tryParse(u['bytes-in'] ?? '0') ?? 0;
+    final outBytes = int.tryParse(u['bytes-out'] ?? '0') ?? 0;
+    if (limitBytes > 0 && (inBytes + outBytes) >= limitBytes) return true;
+  }
+  return false;
+}
+
+Future<int> disableExpiredUsers(String host, String user, String pass) async {
+  int disabled = 0;
+  try {
+    final users = await MikroTikApi().run(host, user, pass, '/ip/hotspot/user/print');
+    for (final u in users) {
+      if (!isExpired(u)) continue;
+      if ((u['disabled'] ?? 'false') == 'true') continue;
+      final id = u['.id'] ?? '';
+      if (id.isNotEmpty) {
+        await MikroTikApi().run(host, user, pass, '/ip/hotspot/user/set', ['=numbers=$id', '=disabled=yes']);
+        disabled++;
+      }
+    }
+  } catch (_) {}
+  return disabled;
+}
+
+Future<int> deleteDisabledUsers(String host, String user, String pass) async {
+  int deleted = 0;
+  try {
+    final users = await MikroTikApi().run(host, user, pass, '/ip/hotspot/user/print');
+    for (final u in users) {
+      final isDis = (u['disabled'] ?? 'false') == 'true';
+      if (!isDis && !isExpired(u)) continue;
+      if (!isDis) continue;
+      final id = u['.id'] ?? '';
+      if (id.isNotEmpty) {
+        await MikroTikApi().run(host, user, pass, '/ip/hotspot/user/remove', ['=numbers=$id']);
+        deleted++;
+      }
+    }
+  } catch (_) {}
+  return deleted;
 }
 
 class FazlakaApp extends StatefulWidget { const FazlakaApp({super.key}); @override State<FazlakaApp> createState() => _FazlakaAppState(); }
@@ -378,14 +447,25 @@ class _CardsTabState extends State<CardsTab> {
   List<Map<String,String>> _active = [], _all = [];
   bool _loading = false;
   String _status = '';
+  String _delMsg = '';
   Future<void> _load() async {
     setState(() { _loading = true; });
     try {
+      final disabled = await disableExpiredUsers(widget.host, widget.user, widget.pass);
+      if (disabled > 0) setState(() => _delMsg = widget.ar ? 'تم تعطيل $disabled يوزر منتهي أوتوماتيك' : 'Disabled $disabled expired users');
       final a = await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/active/print');
       final u = await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/user/print');
       setState(() { _active = a; _all = u; _status = widget.ar ? 'متصل' : 'Connected'; });
     } catch (_) { setState(() => _status = widget.ar ? 'غير متصل' : 'Disconnected'); }
     setState(() => _loading = false);
+  }
+  Future<void> _manualDelete() async {
+    final confirm = await showDialog<bool>(context: context, builder: (_) => AlertDialog(title: Text(widget.ar ? 'حذف المنتهية؟' : 'Delete expired?'), content: Text(widget.ar ? 'هيمسح كل اليوزرات المعطلة، متأكد؟' : 'Delete all disabled users?'), actions: [TextButton(onPressed: () => Navigator.pop(context, false), child: Text(widget.ar ? 'لا' : 'No')), TextButton(onPressed: () => Navigator.pop(context, true), child: Text(widget.ar ? 'نعم احذف' : 'Yes delete'))]));
+    if (confirm != true) return;
+    setState(() => _delMsg = widget.ar ? 'جارٍ الحذف...' : 'Deleting...');
+    final d = await deleteDisabledUsers(widget.host, widget.user, widget.pass);
+    setState(() => _delMsg = widget.ar ? 'تم حذف $d يوزر' : 'Deleted $d users');
+    _load();
   }
   @override void initState() { super.initState(); _load(); }
   @override Widget build(BuildContext context) {
@@ -394,6 +474,9 @@ class _CardsTabState extends State<CardsTab> {
         Text(widget.ar ? 'حالة الراوتر' : 'Router', style: const TextStyle(fontWeight: FontWeight.bold)),
         Text('${widget.ar ? 'حالة الراوتر -' : 'Router -'} $_status'),
       ])),
+      const SizedBox(height: 12),
+      SizedBox(width: double.infinity, height: 48, child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))), onPressed: _manualDelete, child: Text(widget.ar ? 'حذف المنتهية' : 'Delete Expired', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)))),
+      if (_delMsg.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 8), child: Text(_delMsg, style: const TextStyle(fontWeight: FontWeight.bold, color: petrol))),
       const SizedBox(height: 12),
       Row(children: [
         Expanded(child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: _showActive ? petrol : Colors.white), onPressed: () => setState(() => _showActive = true), child: Text(widget.ar ? 'المتصلين الآن' : 'Online', style: TextStyle(color: _showActive ? Colors.white : petrol)))),
@@ -405,7 +488,7 @@ class _CardsTabState extends State<CardsTab> {
       const SizedBox(height: 12),
       if (_loading) const CircularProgressIndicator(),
       if (!_loading && _showActive) ..._active.map((m) => Card(child: ListTile(title: Text('${m['user'] ?? ''} - ${widget.ar ? 'نشط' : 'Active'}')))),
-      if (!_loading && !_showActive) ..._all.map((m) => Card(child: ListTile(title: Text(m['name'] ?? ''), subtitle: Text('${m['profile'] ?? ''}')))),
+      if (!_loading && !_showActive) ..._all.map((m) => Card(child: ListTile(title: Text(m['name'] ?? ''), subtitle: Text('${m['profile'] ?? ''} - ${(m['disabled'] ?? 'false') == 'true' ? (widget.ar ? 'معطل' : 'Disabled') : (widget.ar ? 'شغال' : 'Active')}')))),
     ]));
   }
 }
