@@ -13,7 +13,6 @@ void main() => runApp(const FazlakaApp());
 const petrol = Color(0xFF0A3D3E);
 const bgColor = Color(0xFFDFF5F2);
 
-// ---------- MikroTik API (RouterOS 5.18 MD5: md5(0x00 + pass + challenge)) ----------
 class MikroTikApi {
   Socket? _socket;
   List<int> _buf = [];
@@ -206,11 +205,9 @@ class _HomeTabState extends State<HomeTab> {
   BluetoothConnection? _bt;
   String _msg = '';
   bool _busy = false;
-
   String _quota(String p) => p == '20' ? '2' : p == '50' ? '8' : '20';
   String _days(String p) => p == '20' ? '3d' : p == '50' ? '7d' : '30d';
   String _bytes(String p) => p == '20' ? '2147483648' : p == '50' ? '8589934592' : '21474836480';
-
   Future<void> _pickPrinter() async {
     await Permission.bluetoothConnect.request();
     await Permission.bluetoothScan.request();
@@ -230,11 +227,7 @@ class _HomeTabState extends State<HomeTab> {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${widget.ar ? 'جارٍ الاتصال بـ' : 'Connecting to'} ${d.name}...')));
           bool ok = false;
           for (int i = 0; i < 2 && !ok; i++) {
-            try {
-              try { _bt?.close(); } catch (_) {}
-              _bt = await BluetoothConnection.toAddress(d.address);
-              ok = _bt?.isConnected ?? false;
-            } catch (_) { ok = false; await Future.delayed(const Duration(milliseconds: 1000)); }
+            try { try { _bt?.close(); } catch (_) {} _bt = await BluetoothConnection.toAddress(d.address); ok = _bt?.isConnected ?? false; } catch (_) { ok = false; await Future.delayed(const Duration(milliseconds: 1000)); }
           }
           if (ok) { final sp = await SharedPreferences.getInstance(); await sp.setString('saved_printer_mac', d.address); await sp.setString('saved_printer_name', d.name ?? 'Printer'); }
           if (!mounted) return;
@@ -242,11 +235,8 @@ class _HomeTabState extends State<HomeTab> {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(ok ? (widget.ar ? 'تم الاتصال بالطابعة' : 'Printer connected') : (widget.ar ? 'تعذر الاتصال بالطابعة' : 'Cannot connect'))));
         },
       )).toList()));
-    } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${widget.ar ? 'خطأ الطابعة' : 'Printer error'}: $e')));
-    }
+    } catch (e) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${widget.ar ? 'خطأ الطابعة' : 'Printer error'}: $e'))); }
   }
-
   Future<void> _create() async {
     setState(() { _busy = true; _msg = ''; _created = []; });
     try {
@@ -260,9 +250,7 @@ class _HomeTabState extends State<HomeTab> {
         final found = check.where((m) => m['name'] == name).toList();
         if (found.isEmpty) throw Exception('not found');
         final id = found.first['.id'] ?? '';
-        if (id.isNotEmpty) {
-          await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/user/set', ['=numbers=$id', '=limit-uptime=${_days(_profile)}', '=limit-bytes-total=${_bytes(_profile)}']);
-        }
+        if (id.isNotEmpty) { await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/user/set', ['=numbers=$id', '=limit-uptime=${_days(_profile)}', '=limit-bytes-total=${_bytes(_profile)}']); }
       }
       final sp = await SharedPreferences.getInstance();
       final today = DateTime.now().toIso8601String().substring(0, 10);
@@ -274,7 +262,6 @@ class _HomeTabState extends State<HomeTab> {
     } catch (_) { setState(() => _msg = widget.ar ? 'تعذر إنشاء الكارت' : 'Cannot create card'); }
     setState(() => _busy = false);
   }
-
   Future<void> _print() async {
     if (_created.isEmpty) { setState(() => _msg = widget.ar ? 'أنشئ كارت أولاً' : 'Create a card first'); return; }
     if (_bt == null || !(_bt?.isConnected ?? false)) { setState(() => _msg = widget.ar ? 'اختر الطابعة أولاً' : 'Choose printer first'); return; }
@@ -300,9 +287,7 @@ class _HomeTabState extends State<HomeTab> {
       setState(() => _msg = widget.ar ? 'تمت الطباعة' : 'Printed');
     } catch (_) { setState(() => _msg = widget.ar ? 'تعذر الطباعة' : 'Cannot print'); }
   }
-
   @override void dispose() { try { _bt?.close(); } catch (_) {} super.dispose(); }
-
   @override Widget build(BuildContext context) {
     return SingleChildScrollView(padding: const EdgeInsets.all(16), child: Column(children: [
       Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20)), child: Column(children: [
