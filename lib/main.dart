@@ -272,8 +272,10 @@ class _HomeTabState extends State<HomeTab> {
         final canvas = ui.Canvas(recorder, ui.Rect.fromLTWH(0, 0, 384, 220));
         canvas.drawRect(ui.Rect.fromLTWH(0, 0, 384, 220), ui.Paint()..color = const Color(0xFFFFFFFF));
         void drawText(String text, double y, double size, bool bold) {
-          final builder = ui.ParagraphBuilder(ui.ParagraphStyle(textAlign: ui.TextAlign.center, fontSize: size, fontWeight: bold ? ui.FontWeight.bold : ui.FontWeight.normal));
+          final builder = ui.ParagraphBuilder(ui.ParagraphStyle(textAlign: ui.TextAlign.center, fontSize: size, fontWeight: bold ? ui.FontWeight.bold : ui.FontWeight.normal, textDirection: ui.TextDirection.ltr));
+          builder.pushStyle(ui.TextStyle(color: const Color(0xFF000000), fontSize: size, fontWeight: bold ? ui.FontWeight.bold : ui.FontWeight.normal));
           builder.addText(text);
+          builder.pop();
           final p = builder.build()..layout(ui.ParagraphConstraints(width: 384));
           canvas.drawParagraph(p, ui.Offset(0, y));
         }
@@ -293,7 +295,10 @@ class _HomeTabState extends State<HomeTab> {
             for (int bit = 0; bit < 8; bit++) {
               final idx = (y * 384 + x + bit) * 4;
               final r = rgba[idx];
-              if (r < 128) b |= (0x80 >> bit);
+              final g = rgba[idx + 1];
+              final bl = rgba[idx + 2];
+              final gray = (r + g + bl) ~/ 3;
+              if (gray < 150) b |= (0x80 >> bit);
             }
             mono.add(b);
           }
