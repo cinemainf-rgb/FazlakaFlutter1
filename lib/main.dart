@@ -269,6 +269,8 @@ class _HomeTabState extends State<HomeTab> {
       for (final num in _created) {
         final bytes = <int>[];
         bytes.addAll([0x1B, 0x40]);
+        bytes.addAll([0x1B, 0x7B, 0x00]);
+        bytes.addAll([0x1D, 0x42, 0x00]);
         bytes.addAll([0x1B, 0x61, 0x01]);
         bytes.addAll([0x1D, 0x21, 0x11]);
         bytes.addAll(utf8.encode('FAZLAKA\n'));
