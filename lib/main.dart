@@ -4,7 +4,7 @@ import 'dart:math';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
+import 'package:flutter_bluetooth_serial_plus/flutter_bluetooth_serial_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -152,7 +152,7 @@ class _LoginScreenState extends State<LoginScreen> {
         const SizedBox(height: 20),
         const Text('FAZLAKA', style: TextStyle(fontSize: 36, fontWeight: FontWeight.bold, color: petrol, letterSpacing: 4)),
         const SizedBox(height: 24),
-        TextField(controller: _host, decoration: InputDecoration(labelText: widget.ar ? 'Server IP' : 'Server IP', filled: true, fillColor: Colors.white, border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)))),
+        TextField(controller: _host, decoration: InputDecoration(labelText: 'Server IP', filled: true, fillColor: Colors.white, border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)))),
         const SizedBox(height: 12),
         TextField(controller: _user, decoration: InputDecoration(labelText: widget.ar ? 'اسم المستخدم' : 'Username', filled: true, fillColor: Colors.white, border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)))),
         const SizedBox(height: 12),
