@@ -14,8 +14,32 @@ void main() => runApp(const FazlakaApp());
 const petrol = Color(0xFF0A3D3E);
 const bgColor = Color(0xFFDFF5F2);
 
+int daysForProfile(String p) {
+  if (p == '20') return 3;
+  if (p == '50') return 15;
+  if (p == '100') return 30;
+  if (p == '200') return 30;
+  return 30;
+}
+String quotaFor(String p) => p == '20' ? '2' : p == '50' ? '8' : p == '100' ? '20' : p == '200' ? '45' : '2';
+String bytesFor(String p) => p == '20' ? '2147483648' : p == '50' ? '8589934592' : p == '100' ? '21474836480' : p == '200' ? '48318382080' : '2147483648';
+
 int parseTime(String s) {
   if (s.isEmpty) return 0;
+  if (s.contains(':')) {
+    int days = 0;
+    String rest = s;
+    if (s.contains('d')) {
+      final parts = s.split('d');
+      days = int.tryParse(parts[0]) ?? 0;
+      rest = parts.length > 1 ? parts[1] : '0:0:0';
+    }
+    final p = rest.split(':');
+    int h = 0, m = 0, sec = 0;
+    if (p.length == 3) { h = int.tryParse(p[0]) ?? 0; m = int.tryParse(p[1]) ?? 0; sec = int.tryParse(p[2]) ?? 0; }
+    else if (p.length == 2) { m = int.tryParse(p[0]) ?? 0; sec = int.tryParse(p[1]) ?? 0; }
+    return days * 86400 + h * 3600 + m * 60 + sec;
+  }
   int total = 0;
   final reg = RegExp(r'(\d+)([dhms])');
   for (final m in reg.allMatches(s)) {
@@ -116,7 +140,20 @@ class MikroTikApi {
   }
 }
 
-bool isExpired(Map<String,String> u) {
+bool isExpiredReal(Map<String,String> u) {
+  final profile = u['profile'] ?? '';
+  final days = daysForProfile(profile);
+  final comment = u['comment'] ?? '';
+  if (comment.contains('created:')) {
+    try {
+      final dateStr = comment.split('created:')[1].split(' ')[0].split('|')[0].trim();
+      final created = DateTime.parse(dateStr);
+      final now = DateTime.now();
+      final diffDays = now.difference(created).inDays;
+      if (diffDays >= days) return true;
+      return false;
+    } catch (_) {}
+  }
   final limitTime = u['limit-uptime'] ?? '';
   final up = u['uptime'] ?? '';
   if (limitTime.isNotEmpty) {
@@ -134,12 +171,28 @@ bool isExpired(Map<String,String> u) {
   return false;
 }
 
+int remainingDays(Map<String,String> u) {
+  final profile = u['profile'] ?? '';
+  final days = daysForProfile(profile);
+  final comment = u['comment'] ?? '';
+  if (comment.contains('created:')) {
+    try {
+      final dateStr = comment.split('created:')[1].split(' ')[0].split('|')[0].trim();
+      final created = DateTime.parse(dateStr);
+      final diff = DateTime.now().difference(created).inDays;
+      final left = days - diff;
+      return left < 0 ? 0 : left;
+    } catch (_) { return days; }
+  }
+  return days;
+}
+
 Future<int> disableExpiredUsers(String host, String user, String pass) async {
   int disabled = 0;
   try {
     final users = await MikroTikApi().run(host, user, pass, '/ip/hotspot/user/print');
     for (final u in users) {
-      if (!isExpired(u)) continue;
+      if (!isExpiredReal(u)) continue;
       if ((u['disabled'] ?? 'false') == 'true') continue;
       final id = u['.id'] ?? '';
       if (id.isNotEmpty) {
@@ -157,7 +210,6 @@ Future<int> deleteDisabledUsers(String host, String user, String pass) async {
     final users = await MikroTikApi().run(host, user, pass, '/ip/hotspot/user/print');
     for (final u in users) {
       final isDis = (u['disabled'] ?? 'false') == 'true';
-      if (!isDis && !isExpired(u)) continue;
       if (!isDis) continue;
       final id = u['.id'] ?? '';
       if (id.isNotEmpty) {
@@ -283,9 +335,6 @@ class _HomeTabState extends State<HomeTab> {
   BluetoothConnection? _bt;
   String _msg = '';
   bool _busy = false;
-  String _quota(String p) => p == '20' ? '2' : p == '50' ? '8' : '20';
-  String _days(String p) => p == '20' ? '3d' : p == '50' ? '7d' : '30d';
-  String _bytes(String p) => p == '20' ? '2147483648' : p == '50' ? '8589934592' : '21474836480';
   Future<void> _pickPrinter() async {
     await Permission.bluetoothConnect.request();
     await Permission.bluetoothScan.request();
@@ -321,14 +370,15 @@ class _HomeTabState extends State<HomeTab> {
       final rnd = Random();
       final names = <String>[];
       for (int i = 0; i < _count; i++) { names.add('${1000000 + rnd.nextInt(9000000)}'); }
+      final todayStr = DateTime.now().toIso8601String().substring(0, 10);
       for (final name in names) {
-        final res = await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/user/add', ['=name=$name', '=password=', '=profile=$_profile', '=server=all']);
+        final res = await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/user/add', ['=name=$name', '=password=', '=profile=$_profile', '=server=all', '=comment=created:$todayStr']);
         if (res.any((m) => m['__type__'] == '!trap')) throw Exception('create failed');
         final check = await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/user/print');
         final found = check.where((m) => m['name'] == name).toList();
         if (found.isEmpty) throw Exception('not found');
         final id = found.first['.id'] ?? '';
-        if (id.isNotEmpty) { await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/user/set', ['=numbers=$id', '=limit-uptime=${_days(_profile)}', '=limit-bytes-total=${_bytes(_profile)}']); }
+        if (id.isNotEmpty) { await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/user/set', ['=numbers=$id', '=limit-uptime=${daysForProfile(_profile)}d', '=limit-bytes-total=${bytesFor(_profile)}']); }
       }
       final sp = await SharedPreferences.getInstance();
       final today = DateTime.now().toIso8601String().substring(0, 10);
@@ -360,7 +410,7 @@ class _HomeTabState extends State<HomeTab> {
         drawText('01016620065 - 01141418040', 70, 22, false);
         drawText('------------------------------', 105, 22, false);
         drawText(num, 130, 58, true);
-        drawText('Price: $_profile | Quota: ${_quota(_profile)}GB', 195, 22, false);
+        drawText('Price: $_profile | Quota: ${quotaFor(_profile)}GB', 195, 22, false);
         final pic = recorder.endRecording();
         final img = await pic.toImage(384, 220);
         final byteData = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
@@ -400,8 +450,12 @@ class _HomeTabState extends State<HomeTab> {
       Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20)), child: Column(children: [
         Align(alignment: Alignment.centerRight, child: Text(widget.ar ? 'انشاء كروت' : 'Create Cards', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: petrol))),
         const SizedBox(height: 16),
-        Row(children: ['20','50','100'].map((p) => Expanded(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 4), child: GestureDetector(onTap: () => setState(() => _profile = p), child: Container(height: 58, decoration: BoxDecoration(color: _profile == p ? petrol : const Color(0xFFEDEDED), borderRadius: BorderRadius.circular(14)), alignment: Alignment.center, child: Text(p, style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: _profile == p ? Colors.white : Colors.black))))))).toList()),
-        const SizedBox(height: 16),
+        Row(children: ['20','50'].map((p) => Expanded(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 4), child: GestureDetector(onTap: () => setState(() => _profile = p), child: Container(height: 58, decoration: BoxDecoration(color: _profile == p ? petrol : const Color(0xFFEDEDED), borderRadius: BorderRadius.circular(14)), alignment: Alignment.center, child: Text(p, style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: _profile == p ? Colors.white : Colors.black))))))).toList()),
+        const SizedBox(height: 8),
+        Row(children: ['100','200'].map((p) => Expanded(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 4), child: GestureDetector(onTap: () => setState(() => _profile = p), child: Container(height: 58, decoration: BoxDecoration(color: _profile == p ? petrol : const Color(0xFFEDEDED), borderRadius: BorderRadius.circular(14)), alignment: Alignment.center, child: Text(p, style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: _profile == p ? Colors.white : Colors.black))))))).toList()),
+        const SizedBox(height: 8),
+        Text(widget.ar ? '${quotaFor(_profile)} جيجا - ${daysForProfile(_profile)} يوم' : '${quotaFor(_profile)}GB - ${daysForProfile(_profile)} days', style: const TextStyle(fontWeight: FontWeight.bold, color: petrol)),
+        const SizedBox(height: 8),
         Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
           Text(widget.ar ? 'عدد الكروت' : 'Count', style: const TextStyle(fontSize: 16)),
           Row(children: [
@@ -429,7 +483,7 @@ class _HomeTabState extends State<HomeTab> {
             const Text('01016620065 - 01141418040'),
             const Text('------------------------------'),
             Text(c, style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold)),
-            Text('Price: $_profile | Quota: ${_quota(_profile)}GB'),
+            Text('Price: $_profile | Quota: ${quotaFor(_profile)}GB'),
           ]))),
         ])),
       ],
@@ -448,6 +502,8 @@ class _CardsTabState extends State<CardsTab> {
   bool _loading = false;
   String _status = '';
   String _delMsg = '';
+  String _search = '';
+  final _searchCtrl = TextEditingController();
   Future<void> _load() async {
     setState(() { _loading = true; });
     try {
@@ -459,6 +515,51 @@ class _CardsTabState extends State<CardsTab> {
     } catch (_) { setState(() => _status = widget.ar ? 'غير متصل' : 'Disconnected'); }
     setState(() => _loading = false);
   }
+  List<Map<String,String>> get _filteredActive {
+    if (_search.trim().isEmpty) return _active;
+    final q = _search.trim().toLowerCase();
+    return _active.where((m) => (m['user'] ?? '').toLowerCase().contains(q) || (m['address'] ?? '').toLowerCase().contains(q) || (m['mac-address'] ?? '').toLowerCase().contains(q)).toList();
+  }
+  List<Map<String,String>> get _filteredAll {
+    if (_search.trim().isEmpty) return _all;
+    final q = _search.trim().toLowerCase();
+    return _all.where((m) => (m['name'] ?? '').toLowerCase().contains(q) || (m['profile'] ?? '').toLowerCase().contains(q) || (m['comment'] ?? '').toLowerCase().contains(q)).toList();
+  }
+  Future<void> _kickActive(String id, String name) async {
+    final confirm = await showDialog<String>(context: context, builder: (_) => AlertDialog(
+      title: Text(widget.ar ? 'اخراج $name ؟' : 'Kick $name ?'),
+      content: Text(widget.ar ? 'تختار ايه؟' : 'Choose:'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context, 'cancel'), child: Text(widget.ar ? 'الغاء' : 'Cancel')),
+        TextButton(onPressed: () => Navigator.pop(context, 'kick'), child: Text(widget.ar ? 'اخراج بس' : 'Kick only', style: const TextStyle(color: Colors.orange))),
+        TextButton(onPressed: () => Navigator.pop(context, 'kick_disable'), child: Text(widget.ar ? 'اخراج + تعطيل' : 'Kick + Disable', style: const TextStyle(color: Colors.red))),
+      ],
+    ));
+    if (confirm == null || confirm == 'cancel') return;
+    try {
+      await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/active/remove', ['=numbers=$id']);
+      if (confirm == 'kick_disable') {
+        final users = await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/user/print');
+        final found = users.where((m) => m['name'] == name).toList();
+        if (found.isNotEmpty) {
+          final uid = found.first['.id'] ?? '';
+          if (uid.isNotEmpty) await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/user/set', ['=numbers=$uid', '=disabled=yes']);
+        }
+      }
+      setState(() => _delMsg = widget.ar ? 'تم اخراج $name' : 'Kicked $name');
+      _load();
+    } catch (_) { setState(() => _delMsg = widget.ar ? 'تعذر الاخراج' : 'Cannot kick'); }
+  }
+  Future<void> _kickAll() async {
+    final confirm = await showDialog<bool>(context: context, builder: (_) => AlertDialog(title: Text(widget.ar ? 'اخراج الكل؟' : 'Kick all?'), content: Text(widget.ar ? 'هتخرج كل المتصلين دلوقتي، متأكد؟' : 'Kick all active users?'), actions: [TextButton(onPressed: () => Navigator.pop(context, false), child: Text(widget.ar ? 'لا' : 'No')), TextButton(onPressed: () => Navigator.pop(context, true), child: Text(widget.ar ? 'نعم اخرج الكل' : 'Yes kick all'))]));
+    if (confirm != true) return;
+    for (final m in _active) {
+      final id = m['.id'] ?? '';
+      if (id.isNotEmpty) { try { await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/active/remove', ['=numbers=$id']); } catch (_) {} }
+    }
+    setState(() => _delMsg = widget.ar ? 'تم اخراج الكل' : 'Kicked all');
+    _load();
+  }
   Future<void> _manualDelete() async {
     final confirm = await showDialog<bool>(context: context, builder: (_) => AlertDialog(title: Text(widget.ar ? 'حذف المنتهية؟' : 'Delete expired?'), content: Text(widget.ar ? 'هيمسح كل اليوزرات المعطلة، متأكد؟' : 'Delete all disabled users?'), actions: [TextButton(onPressed: () => Navigator.pop(context, false), child: Text(widget.ar ? 'لا' : 'No')), TextButton(onPressed: () => Navigator.pop(context, true), child: Text(widget.ar ? 'نعم احذف' : 'Yes delete'))]));
     if (confirm != true) return;
@@ -467,7 +568,15 @@ class _CardsTabState extends State<CardsTab> {
     setState(() => _delMsg = widget.ar ? 'تم حذف $d يوزر' : 'Deleted $d users');
     _load();
   }
+  Future<void> _enableUser(String id, String name) async {
+    try {
+      await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/user/set', ['=numbers=$id', '=disabled=no']);
+      setState(() => _delMsg = widget.ar ? 'تم تفعيل $name' : 'Enabled $name');
+      _load();
+    } catch (_) {}
+  }
   @override void initState() { super.initState(); _load(); }
+  @override void dispose() { _searchCtrl.dispose(); super.dispose(); }
   @override Widget build(BuildContext context) {
     return SingleChildScrollView(padding: const EdgeInsets.all(16), child: Column(children: [
       Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20)), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
@@ -475,20 +584,54 @@ class _CardsTabState extends State<CardsTab> {
         Text('${widget.ar ? 'حالة الراوتر -' : 'Router -'} $_status'),
       ])),
       const SizedBox(height: 12),
-      SizedBox(width: double.infinity, height: 48, child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))), onPressed: _manualDelete, child: Text(widget.ar ? 'حذف المنتهية' : 'Delete Expired', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)))),
+      Row(children: [
+        Expanded(child: SizedBox(height: 48, child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.orange, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))), onPressed: _kickAll, child: Text(widget.ar ? 'اخراج الكل' : 'Kick All', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold))))),
+        const SizedBox(width: 8),
+        Expanded(child: SizedBox(height: 48, child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))), onPressed: _manualDelete, child: Text(widget.ar ? 'حذف المنتهية' : 'Delete Expired', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold))))),
+      ]),
       if (_delMsg.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 8), child: Text(_delMsg, style: const TextStyle(fontWeight: FontWeight.bold, color: petrol))),
       const SizedBox(height: 12),
       Row(children: [
-        Expanded(child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: _showActive ? petrol : Colors.white), onPressed: () => setState(() => _showActive = true), child: Text(widget.ar ? 'المتصلين الآن' : 'Online', style: TextStyle(color: _showActive ? Colors.white : petrol)))),
+        Expanded(child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: _showActive ? petrol : Colors.white), onPressed: () { setState(() { _showActive = true; _search = ''; _searchCtrl.clear(); }); }, child: Text(widget.ar ? 'المتصلين الآن' : 'Online', style: TextStyle(color: _showActive ? Colors.white : petrol)))),
         const SizedBox(width: 8),
-        Expanded(child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: !_showActive ? petrol : Colors.white), onPressed: () => setState(() => _showActive = false), child: Text(widget.ar ? 'كل الكروت' : 'All Cards', style: TextStyle(color: !_showActive ? Colors.white : petrol)))),
+        Expanded(child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: !_showActive ? petrol : Colors.white), onPressed: () { setState(() { _showActive = false; _search = ''; _searchCtrl.clear(); }); }, child: Text(widget.ar ? 'كل الكروت' : 'All Cards', style: TextStyle(color: !_showActive ? Colors.white : petrol)))),
       ]),
+      const SizedBox(height: 12),
+      TextField(
+        controller: _searchCtrl,
+        onChanged: (v) => setState(() => _search = v),
+        decoration: InputDecoration(
+          hintText: _showActive ? (widget.ar ? 'بحث في المتصلين - رقم أو IP' : 'Search active - number or IP') : (widget.ar ? 'بحث في الكروت - رقم أو بروفايل' : 'Search cards - number or profile'),
+          prefixIcon: const Icon(Icons.search, color: petrol),
+          suffixIcon: _search.isNotEmpty ? IconButton(icon: const Icon(Icons.clear), onPressed: () { setState(() { _search = ''; _searchCtrl.clear(); }); }) : null,
+          filled: true, fillColor: Colors.white,
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none),
+        ),
+      ),
       const SizedBox(height: 8),
-      Text(widget.ar ? 'النشط: ${_active.length} | الكروت: ${_all.length}' : 'Active: ${_active.length} | Cards: ${_all.length}'),
+      Text(widget.ar ? 'النشط: ${_active.length} | الكروت: ${_all.length} | النتيجة: ${_showActive ? _filteredActive.length : _filteredAll.length}' : 'Active: ${_active.length} | Cards: ${_all.length} | Found: ${_showActive ? _filteredActive.length : _filteredAll.length}'),
       const SizedBox(height: 12),
       if (_loading) const CircularProgressIndicator(),
-      if (!_loading && _showActive) ..._active.map((m) => Card(child: ListTile(title: Text('${m['user'] ?? ''} - ${widget.ar ? 'نشط' : 'Active'}')))),
-      if (!_loading && !_showActive) ..._all.map((m) => Card(child: ListTile(title: Text(m['name'] ?? ''), subtitle: Text('${m['profile'] ?? ''} - ${(m['disabled'] ?? 'false') == 'true' ? (widget.ar ? 'معطل' : 'Disabled') : (widget.ar ? 'شغال' : 'Active')}')))),
+      if (!_loading && _showActive) ..._filteredActive.map((m) {
+        final name = m['user'] ?? '';
+        final id = m['.id'] ?? '';
+        return Card(child: ListTile(
+          title: Text('$name - ${widget.ar ? 'نشط' : 'Active'}'),
+          subtitle: Text('${m['address'] ?? ''} - ${m['uptime'] ?? ''}'),
+          trailing: IconButton(icon: const Icon(Icons.logout, color: Colors.red), tooltip: widget.ar ? 'اخراج' : 'Kick', onPressed: () => _kickActive(id, name)),
+        ));
+      }),
+      if (!_loading && !_showActive) ..._filteredAll.map((m) {
+        final isDis = (m['disabled'] ?? 'false') == 'true';
+        final left = remainingDays(m);
+        return Card(child: ListTile(
+          title: Text(m['name'] ?? ''),
+          subtitle: Text('${m['profile'] ?? ''} - ${isDis ? (widget.ar ? 'معطل' : 'Disabled') : (widget.ar ? 'شغال - باقي $left يوم' : 'Active - $left days left')}'),
+          trailing: isDis ? IconButton(icon: const Icon(Icons.check_circle, color: Colors.green), tooltip: widget.ar ? 'تفعيل' : 'Enable', onPressed: () => _enableUser(m['.id'] ?? '', m['name'] ?? '')) : null,
+        ));
+      }),
+      if (!_loading && _showActive && _filteredActive.isEmpty) Padding(padding: const EdgeInsets.only(top: 20), child: Text(widget.ar ? 'مفيش نتيجة' : 'No results')),
+      if (!_loading && !_showActive && _filteredAll.isEmpty) Padding(padding: const EdgeInsets.only(top: 20), child: Text(widget.ar ? 'مفيش نتيجة' : 'No results')),
     ]));
   }
 }
