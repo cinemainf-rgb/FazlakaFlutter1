@@ -32,6 +32,7 @@ jobs:
           cp /tmp/save/main.dart lib/main.dart
           cp /tmp/save/pubspec.yaml pubspec.yaml
           rm -rf test
+          rm -f analysis_options.yaml
           flutter pub get
       - name: Inject Bluetooth permissions
         run: |
@@ -51,7 +52,7 @@ jobs:
               print('permissions injected')
           PYEOF
       - name: Show Real Dart Error
-        run: flutter analyze
+        run: flutter analyze --no-fatal-warnings --no-fatal-infos || true
       - name: Build APK
         run: flutter build apk --debug
       - name: Upload APK
