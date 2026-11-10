@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bluetooth_serial_plus/flutter_bluetooth_serial_plus.dart';
@@ -267,24 +268,46 @@ class _HomeTabState extends State<HomeTab> {
     if (_bt == null || !(_bt?.isConnected ?? false)) { setState(() => _msg = widget.ar ? 'اختر الطابعة أولاً' : 'Choose printer first'); return; }
     try {
       for (final num in _created) {
+        final recorder = ui.PictureRecorder();
+        final canvas = ui.Canvas(recorder, ui.Rect.fromLTWH(0, 0, 384, 220));
+        canvas.drawRect(ui.Rect.fromLTWH(0, 0, 384, 220), ui.Paint()..color = const Color(0xFFFFFFFF));
+        void drawText(String text, double y, double size, bool bold) {
+          final builder = ui.ParagraphBuilder(ui.ParagraphStyle(textAlign: ui.TextAlign.center, fontSize: size, fontWeight: bold ? ui.FontWeight.bold : ui.FontWeight.normal));
+          builder.addText(text);
+          final p = builder.build()..layout(ui.ParagraphConstraints(width: 384));
+          canvas.drawParagraph(p, ui.Offset(0, y));
+        }
+        drawText('FAZLAKA', 10, 42, true);
+        drawText('01016620065 - 01141418040', 70, 22, false);
+        drawText('------------------------------', 105, 22, false);
+        drawText(num, 130, 58, true);
+        drawText('Price: $_profile | Quota: ${_quota(_profile)}GB', 195, 22, false);
+        final pic = recorder.endRecording();
+        final img = await pic.toImage(384, 220);
+        final byteData = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
+        final rgba = byteData!.buffer.asUint8List();
+        final mono = <int>[];
+        for (int y = 0; y < 220; y++) {
+          for (int x = 0; x < 384; x += 8) {
+            int b = 0;
+            for (int bit = 0; bit < 8; bit++) {
+              final idx = (y * 384 + x + bit) * 4;
+              final r = rgba[idx];
+              if (r < 128) b |= (0x80 >> bit);
+            }
+            mono.add(b);
+          }
+        }
         final bytes = <int>[];
         bytes.addAll([0x1B, 0x40]);
-        bytes.addAll([0x1B, 0x7B, 0x00]);
-        bytes.addAll([0x1D, 0x42, 0x00]);
         bytes.addAll([0x1B, 0x61, 0x01]);
-        bytes.addAll([0x1D, 0x21, 0x11]);
-        bytes.addAll(utf8.encode('FAZLAKA\n'));
-        bytes.addAll([0x1D, 0x21, 0x00]);
-        bytes.addAll(utf8.encode('01016620065 - 01141418040\n'));
-        bytes.addAll(utf8.encode('------------------------------\n'));
-        bytes.addAll([0x1D, 0x21, 0x22]);
-        bytes.addAll(utf8.encode('$num\n'));
-        bytes.addAll([0x1D, 0x21, 0x00]);
-        bytes.addAll(utf8.encode('Price: $_profile | Quota: ${_quota(_profile)}GB\n\n\n'));
+        bytes.addAll([0x1D, 0x76, 0x30, 0x00, 48, 0, 220, 0]);
+        bytes.addAll(mono);
+        bytes.addAll([0x0A, 0x0A, 0x0A]);
         bytes.addAll([0x1D, 0x56, 0x00]);
         _bt!.output.add(Uint8List.fromList(bytes));
         await _bt!.output.allSent;
-        await Future.delayed(const Duration(milliseconds: 500));
+        await Future.delayed(const Duration(milliseconds: 800));
       }
       setState(() => _msg = widget.ar ? 'تمت الطباعة' : 'Printed');
     } catch (_) { setState(() => _msg = widget.ar ? 'تعذر الطباعة' : 'Cannot print'); }
