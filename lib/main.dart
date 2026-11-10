@@ -183,12 +183,20 @@ class _HomeScreenState extends State<HomeScreen> {
         : _tab == 1 ? CardsTab(ar: widget.ar, host: widget.host, user: widget.user, pass: widget.pass)
         : _tab == 2 ? SalesTab(ar: widget.ar)
         : AccountTab(ar: widget.ar),
-      bottomNavigationBar: BottomNavigationBar(currentIndex: _tab, selectedItemColor: petrol, onTap: (i) => setState(() => _tab = i), items: [
-        BottomNavigationBarItem(icon: const Icon(Icons.home), label: widget.ar ? 'الرئيسية' : 'Home'),
-        BottomNavigationBarItem(icon: const Icon(Icons.card_membership), label: widget.ar ? 'الكروت' : 'Cards'),
-        BottomNavigationBarItem(icon: const Icon(Icons.bar_chart), label: widget.ar ? 'المبيعات' : 'Sales'),
-        BottomNavigationBarItem(icon: const Icon(Icons.person), label: widget.ar ? 'الحساب' : 'Account'),
-      ]),
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _tab,
+        backgroundColor: petrol,
+        selectedItemColor: Colors.white,
+        unselectedItemColor: Colors.white70,
+        type: BottomNavigationBarType.fixed,
+        onTap: (i) => setState(() => _tab = i),
+        items: [
+          BottomNavigationBarItem(icon: const Icon(Icons.home), label: widget.ar ? 'الرئيسية' : 'Home'),
+          BottomNavigationBarItem(icon: const Icon(Icons.card_membership), label: widget.ar ? 'الكروت' : 'Cards'),
+          BottomNavigationBarItem(icon: const Icon(Icons.bar_chart), label: widget.ar ? 'المبيعات' : 'Sales'),
+          BottomNavigationBarItem(icon: const Icon(Icons.person), label: widget.ar ? 'الحساب' : 'Account'),
+        ],
+      ),
     );
   }
 }
