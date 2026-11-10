@@ -42,11 +42,13 @@ jobs:
           t = p.read_text()
           if 'BLUETOOTH_CONNECT' not in t:
               perms = ""
-              perms += '    <uses-permission android:name="android.permission.BLUETOOTH" />\n'
-              perms += '    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />\n'
+              perms += '    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />\n'
+              perms += '    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />\n'
               perms += '    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />\n'
-              perms += '    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />\n'
+              perms += '    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />\n'
+              perms += '    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />\n'
               perms += '    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n'
+              perms += '    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n'
               t = t.replace('<application', perms + '    <application', 1)
               p.write_text(t)
               print('permissions injected')
