@@ -54,24 +54,99 @@ int parseTime(String s) {
   return total;
 }
 
+int _toInt(dynamic v) {
+  if (v is int) return v;
+  if (v is double) return v.toInt();
+  if (v is String) return int.tryParse(v) ?? 0;
+  if (v is num) return v.toInt();
+  return 0;
+}
+
+// ---------- Monthly Sales ----------
+String monthKeyOf(DateTime d) => '${d.year}-${d.month.toString().padLeft(2, '0')}';
+String monthLabel(String k) {
+  final p = k.split('-');
+  const ms = ['', 'يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو', 'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'];
+  final mi = int.tryParse(p[1]) ?? 1;
+  return '${ms[mi]} ${p[0]}';
+}
+
+Future<void> saveMonthlySale(String profile, int count) async {
+  final sp = await SharedPreferences.getInstance();
+  final month = monthKeyOf(DateTime.now());
+  List<Map<String, dynamic>> all = [];
+  final raw = sp.getString('sales_all');
+  if (raw != null && raw.isNotEmpty) {
+    try { all = List<Map<String, dynamic>>.from(jsonDecode(raw)); } catch (_) {}
+  }
+  final price = _toInt(profile);
+  for (int i = 0; i < count; i++) {
+    all.add({'m': month, 'p': profile, 'pr': price, 'd': DateTime.now().millisecondsSinceEpoch});
+  }
+  await sp.setString('sales_all', jsonEncode(all));
+  final today = DateTime.now().toIso8601String().substring(0, 10);
+  final oldCount = sp.getInt('sales_${today}_count') ?? 0;
+  final oldSum = sp.getInt('sales_${today}_sum') ?? 0;
+  await sp.setInt('sales_${today}_count', oldCount + count);
+  await sp.setInt('sales_${today}_sum', oldSum + (price * count));
+}
+
+Future<List<Map<String, dynamic>>> loadAllSales() async {
+  final sp = await SharedPreferences.getInstance();
+  final raw = sp.getString('sales_all');
+  if (raw == null || raw.isEmpty) return [];
+  try { return List<Map<String, dynamic>>.from(jsonDecode(raw)); } catch (_) { return []; }
+}
+
+Future<void> saveMonthlyExpense(int amount, String note) async {
+  final sp = await SharedPreferences.getInstance();
+  final month = monthKeyOf(DateTime.now());
+  List<Map<String, dynamic>> all = [];
+  final raw = sp.getString('expenses_all');
+  if (raw != null && raw.isNotEmpty) {
+    try { all = List<Map<String, dynamic>>.from(jsonDecode(raw)); } catch (_) {}
+  }
+  all.add({'m': month, 'a': amount, 'n': note, 'd': DateTime.now().millisecondsSinceEpoch});
+  await sp.setString('expenses_all', jsonEncode(all));
+  final today = DateTime.now().toIso8601String().substring(0, 10);
+  final old = sp.getInt('expenses_${today}') ?? 0;
+  await sp.setInt('expenses_${today}', old + amount);
+}
+
+Future<List<Map<String, dynamic>>> loadAllExpenses() async {
+  final sp = await SharedPreferences.getInstance();
+  final raw = sp.getString('expenses_all');
+  if (raw == null || raw.isEmpty) return [];
+  try { return List<Map<String, dynamic>>.from(jsonDecode(raw)); } catch (_) { return []; }
+}
+
+// ---------- MikroTik API - Fixed: close socket + clear buffer ----------
 class MikroTikApi {
   Socket? _socket;
   List<int> _buf = [];
   Future<List<Map<String,String>>> run(String host, String user, String pass, String cmd, [List<String> args = const []]) async {
-    _socket = await Socket.connect(host, 8728, timeout: const Duration(seconds: 5));
-    _socket!.listen((d) { _buf.addAll(d); });
-    final chalHex = await _loginStep(user);
-    List<int> hexToBytes(String hex) {
-      final out = <int>[];
-      for (int i = 0; i < hex.length; i += 2) out.add(int.parse(hex.substring(i, i + 2), radix: 16));
-      return out;
+    _buf = [];
+    try {
+      _socket = await Socket.connect(host, 8728, timeout: const Duration(seconds: 5));
+      _socket!.listen((d) { _buf.addAll(d); });
+      final chalHex = await _loginStep(user);
+      List<int> hexToBytes(String hex) {
+        final out = <int>[];
+        for (int i = 0; i < hex.length; i += 2) out.add(int.parse(hex.substring(i, i + 2), radix: 16));
+        return out;
+      }
+      final respHash = md5.convert([0, ...utf8.encode(pass), ...hexToBytes(chalHex)]).toString();
+      await _send(['/login', '=name=$user', '=response=00$respHash']);
+      final loginRes = await _readSentence();
+      if (loginRes.any((m) => m['__type__'] == '!trap')) throw Exception('login failed');
+      await _send([cmd, ...args]);
+      final result = await _readAll();
+      return result;
+    } finally {
+      try { await _socket?.close(); } catch (_) {}
+      _socket = null;
+      _buf = [];
     }
-    final respHash = md5.convert([0, ...utf8.encode(pass), ...hexToBytes(chalHex)]).toString();
-    await _send(['/login', '=name=$user', '=response=00$respHash']);
-    final loginRes = await _readSentence();
-    if (loginRes.any((m) => m['__type__'] == '!trap')) throw Exception('login failed');
-    await _send([cmd, ...args]);
-    return _readAll();
   }
   Future<String> _loginStep(String user) async {
     await _send(['/login', '=name=$user']);
@@ -335,15 +410,59 @@ class _HomeTabState extends State<HomeTab> {
   BluetoothConnection? _bt;
   String _msg = '';
   bool _busy = false;
+  bool _autoTried = false;
+
+  @override void initState() {
+    super.initState();
+    Future.delayed(const Duration(milliseconds: 500), _autoConnectPrinter);
+  }
+
+  Future<void> _autoConnectPrinter() async {
+    if (_autoTried) return;
+    _autoTried = true;
+    try {
+      await Permission.bluetoothConnect.request();
+      await Permission.bluetoothScan.request();
+      await Permission.locationWhenInUse.request();
+      final sp = await SharedPreferences.getInstance();
+      final savedMac = sp.getString('saved_printer_mac') ?? '';
+      final savedName = sp.getString('saved_printer_name') ?? '';
+      final enabled = await FlutterBluetoothSerialPlus.isEnabled;
+      if (enabled != true) return;
+      final bonded = await FlutterBluetoothSerialPlus.getBondedDevices();
+      BluetoothDevice? target;
+      for (final d in bonded) {
+        final n = (d.name ?? '').toLowerCase();
+        if (savedMac.isNotEmpty && d.address == savedMac) { target = d; break; }
+        if (n.contains('razytech') || n.contains('5890') || (savedName.isNotEmpty && n == savedName.toLowerCase())) { target = d; break; }
+      }
+      if (target == null) return;
+      if (_bt != null && _bt!.isConnected) return;
+      for (int i = 0; i < 2; i++) {
+        try {
+          try { _bt?.close(); } catch (_) {}
+          _bt = await BluetoothConnection.toAddress(target.address);
+          if (_bt?.isConnected ?? false) break;
+        } catch (_) { await Future.delayed(const Duration(milliseconds: 800)); }
+      }
+      if (_bt?.isConnected ?? false) {
+        await sp.setString('saved_printer_mac', target.address);
+        await sp.setString('saved_printer_name', target.name ?? 'Printer');
+        if (!mounted) return;
+        setState(() => _printer = target!.name ?? 'Printer');
+      }
+    } catch (_) {}
+  }
+
   Future<void> _pickPrinter() async {
     await Permission.bluetoothConnect.request();
     await Permission.bluetoothScan.request();
     await Permission.locationWhenInUse.request();
     await Permission.bluetoothAdvertise.request();
     try {
-      final enabled = await FlutterBluetoothSerial.instance.isEnabled ?? false;
-      if (!enabled) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(widget.ar ? 'شغل البلوتوث الأول' : 'Turn Bluetooth on'))); return; }
-      final bonded = await FlutterBluetoothSerial.instance.getBondedDevices();
+      final enabled = await FlutterBluetoothSerialPlus.isEnabled;
+      if (enabled != true) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(widget.ar ? 'شغل البلوتوث الأول' : 'Turn Bluetooth on'))); return; }
+      final bonded = await FlutterBluetoothSerialPlus.getBondedDevices();
       if (!mounted) return;
       if (bonded.isEmpty) { ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(widget.ar ? 'لا توجد طابعة مقترنة - اقترن من إعدادات الموبايل الأول' : 'No paired printer'))); return; }
       showModalBottomSheet(context: context, builder: (_) => ListView(children: bonded.map((d) => ListTile(
@@ -380,19 +499,19 @@ class _HomeTabState extends State<HomeTab> {
         final id = found.first['.id'] ?? '';
         if (id.isNotEmpty) { await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/user/set', ['=numbers=$id', '=limit-uptime=${daysForProfile(_profile)}d', '=limit-bytes-total=${bytesFor(_profile)}']); }
       }
-      final sp = await SharedPreferences.getInstance();
-      final today = DateTime.now().toIso8601String().substring(0, 10);
-      final oldCount = sp.getInt('sales_${today}_count') ?? 0;
-      final oldSum = sp.getInt('sales_${today}_sum') ?? 0;
-      await sp.setInt('sales_${today}_count', oldCount + names.length);
-      await sp.setInt('sales_${today}_sum', oldSum + (int.parse(_profile) * names.length));
+      await saveMonthlySale(_profile, names.length);
       setState(() { _created = names; _msg = widget.ar ? 'تم إنشاء $_count كارت بنجاح' : 'Created $_count cards successfully'; });
     } catch (_) { setState(() => _msg = widget.ar ? 'تعذر إنشاء الكارت' : 'Cannot create card'); }
     setState(() => _busy = false);
   }
   Future<void> _print() async {
     if (_created.isEmpty) { setState(() => _msg = widget.ar ? 'أنشئ كارت أولاً' : 'Create a card first'); return; }
-    if (_bt == null || !(_bt?.isConnected ?? false)) { setState(() => _msg = widget.ar ? 'اختر الطابعة أولاً' : 'Choose printer first'); return; }
+    if (_bt == null || !(_bt?.isConnected ?? false)) {
+      setState(() => _msg = widget.ar ? 'جارٍ الاتصال بالطابعة أوتوماتيك...' : 'Auto-connecting printer...');
+      _autoTried = false;
+      await _autoConnectPrinter();
+      if (_bt == null || !(_bt?.isConnected ?? false)) { setState(() => _msg = widget.ar ? 'اختر الطابعة أولاً' : 'Choose printer first'); return; }
+    }
     try {
       for (final num in _created) {
         final recorder = ui.PictureRecorder();
@@ -470,7 +589,9 @@ class _HomeTabState extends State<HomeTab> {
       const SizedBox(height: 12),
       SizedBox(width: double.infinity, height: 52, child: OutlinedButton(style: OutlinedButton.styleFrom(side: const BorderSide(color: petrol), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))), onPressed: _print, child: Text(widget.ar ? 'طباعة' : 'Print', style: const TextStyle(color: petrol, fontSize: 18, fontWeight: FontWeight.bold)))),
       const SizedBox(height: 12),
-      SizedBox(width: double.infinity, height: 52, child: ElevatedButton.icon(style: ElevatedButton.styleFrom(backgroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: const BorderSide(color: petrol))), onPressed: _pickPrinter, icon: const Icon(Icons.bluetooth, color: petrol), label: Text(_printer == 'غير متصلة' ? (widget.ar ? 'توصيل الطابعة' : 'Connect Printer') : '${widget.ar ? 'الطابعة' : 'Printer'}: $_printer', style: const TextStyle(color: petrol, fontSize: 16, fontWeight: FontWeight.bold)))),
+      SizedBox(width: double.infinity, height: 52, child: ElevatedButton.icon(style: ElevatedButton.styleFrom(backgroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: const BorderSide(color: petrol))), onPressed: _pickPrinter, icon: const Icon(Icons.bluetooth, color: petrol), label: Text(_printer == 'غير متصلة' ? (widget.ar ? 'توصيل الطابعة - أوتوماتيك' : 'Connect Printer - Auto') : '${widget.ar ? 'الطابعة' : 'Printer'}: $_printer', style: const TextStyle(color: petrol, fontSize: 16, fontWeight: FontWeight.bold)))),
+      const SizedBox(height: 6),
+      Text(widget.ar ? 'الطابعة بتتصل أوتوماتيك أول ما تفتح التطبيق' : 'Printer auto-connects on open', style: const TextStyle(fontSize: 11, color: Colors.grey)),
       const SizedBox(height: 12),
       if (_msg.isNotEmpty) Text(_msg, style: const TextStyle(fontWeight: FontWeight.bold)),
       if (_created.isNotEmpty) ...[
@@ -638,21 +759,55 @@ class _CardsTabState extends State<CardsTab> {
 
 class SalesTab extends StatefulWidget { final bool ar; const SalesTab({super.key, required this.ar}); @override State<SalesTab> createState() => _SalesTabState(); }
 class _SalesTabState extends State<SalesTab> {
-  int _count = 0, _sum = 0;
+  List<Map<String, dynamic>> _sales = [];
+  List<Map<String, dynamic>> _expenses = [];
   @override void initState() { super.initState(); _load(); }
   Future<void> _load() async {
-    final sp = await SharedPreferences.getInstance();
-    final today = DateTime.now().toIso8601String().substring(0, 10);
-    setState(() { _count = sp.getInt('sales_${today}_count') ?? 0; _sum = sp.getInt('sales_${today}_sum') ?? 0; });
+    final s = await loadAllSales();
+    final e = await loadAllExpenses();
+    setState(() { _sales = s; _expenses = e; });
   }
   @override Widget build(BuildContext context) {
-    return Padding(padding: const EdgeInsets.all(16), child: Column(children: [
+    final cur = monthKeyOf(DateTime.now());
+    final curSales = _sales.where((e) => e['m'] == cur).toList();
+    final curExp = _expenses.where((e) => e['m'] == cur).toList();
+    final curTotal = curSales.fold<int>(0, (a, b) => a + _toInt(b['pr']));
+    final curExpTotal = curExp.fold<int>(0, (a, b) => a + _toInt(b['a']));
+    final curNet = curTotal - curExpTotal;
+    final months = {..._sales.map((e) => e['m'].toString()), ..._expenses.map((e) => e['m'].toString())}.toList()..sort((a, b) => b.compareTo(a));
+    if (months.isEmpty) months.add(cur);
+    return SingleChildScrollView(padding: const EdgeInsets.all(16), child: Column(children: [
       Container(width: double.infinity, padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20)), child: Column(children: [
-        Text(widget.ar ? 'مبيعات اليوم' : 'Today Sales', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+        Text(widget.ar ? 'مبيعات ${monthLabel(cur)}' : 'Sales ${monthLabel(cur)}', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
         const SizedBox(height: 12),
-        Text('$_count ${widget.ar ? 'كارت' : 'cards'}', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-        Text('$_sum ${widget.ar ? 'جنيه' : 'EGP'}', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: petrol)),
+        Text('${curSales.length} ${widget.ar ? 'كارت' : 'cards'}', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+        Text('$curTotal ${widget.ar ? 'جنيه مبيعات' : 'EGP sales'}', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: petrol)),
+        Text('$curExpTotal ${widget.ar ? 'جنيه مصاريف' : 'EGP expenses'}', style: const TextStyle(fontSize: 16)),
+        Text('${widget.ar ? 'الصافي' : 'Net'}: $curNet', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: curNet >= 0 ? Colors.green : Colors.red)),
+        const SizedBox(height: 8),
+        Text(widget.ar ? 'كروت: 20=${curSales.where((e) => e['p'] == '20').length} | 50=${curSales.where((e) => e['p'] == '50').length} | 100=${curSales.where((e) => e['p'] == '100').length} | 200=${curSales.where((e) => e['p'] == '200').length}' : 'Cards: 20=${curSales.where((e) => e['p'] == '20').length} | 50=${curSales.where((e) => e['p'] == '50').length} | 100=${curSales.where((e) => e['p'] == '100').length} | 200=${curSales.where((e) => e['p'] == '200').length}'),
       ])),
+      const SizedBox(height: 16),
+      Align(alignment: Alignment.centerRight, child: Text(widget.ar ? 'تقارير الشهور - مكسب / خسارة' : 'Monthly Reports - Profit / Loss', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: petrol))),
+      const SizedBox(height: 10),
+      ...months.map((m) {
+        final ms = _sales.where((e) => e['m'] == m).toList();
+        final me = _expenses.where((e) => e['m'] == m).toList();
+        final tot = ms.fold<int>(0, (a, b) => a + _toInt(b['pr']));
+        final exp = me.fold<int>(0, (a, b) => a + _toInt(b['a']));
+        final net = tot - exp;
+        return Container(margin: const EdgeInsets.only(bottom: 10), padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            Text(monthLabel(m), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            Container(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5), decoration: BoxDecoration(color: net >= 0 ? Colors.green : Colors.red, borderRadius: BorderRadius.circular(20)), child: Text(net >= 0 ? '${widget.ar ? 'مكسب' : 'Profit'} $net ج' : '${widget.ar ? 'خسارة' : 'Loss'} ${-net} ج', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold))),
+          ]),
+          const SizedBox(height: 8),
+          Text(widget.ar ? 'كروت: 20=${ms.where((e) => e['p'] == '20').length} | 50=${ms.where((e) => e['p'] == '50').length} | 100=${ms.where((e) => e['p'] == '100').length} | 200=${ms.where((e) => e['p'] == '200').length}' : 'Cards: 20=${ms.where((e) => e['p'] == '20').length} | 50=${ms.where((e) => e['p'] == '50').length} | 100=${ms.where((e) => e['p'] == '100').length} | 200=${ms.where((e) => e['p'] == '200').length}'),
+          Text('${widget.ar ? 'المبيعات' : 'Sales'}: $tot ج - ${widget.ar ? 'المصاريف' : 'Expenses'}: $exp ج'),
+        ]));
+      }),
+      const SizedBox(height: 8),
+      Text(widget.ar ? 'المبيعات بتتجمع طول الشهر، والشهر الجديد بيبدأ صفر، والقديم بيفضل هنا.' : 'Sales accumulate all month, new month starts at 0, old stays here.', style: const TextStyle(color: Colors.grey, fontSize: 12)),
     ]));
   }
 }
@@ -661,23 +816,34 @@ class AccountTab extends StatefulWidget { final bool ar; const AccountTab({super
 class _AccountTabState extends State<AccountTab> {
   int _sales = 0, _expenses = 0;
   Future<void> _load() async {
-    final sp = await SharedPreferences.getInstance();
-    final today = DateTime.now().toIso8601String().substring(0, 10);
-    setState(() { _sales = sp.getInt('sales_${today}_sum') ?? 0; _expenses = sp.getInt('expenses_${today}') ?? 0; });
+    final s = await loadAllSales();
+    final e = await loadAllExpenses();
+    final cur = monthKeyOf(DateTime.now());
+    setState(() {
+      _sales = s.where((x) => x['m'] == cur).fold<int>(0, (a, b) => a + _toInt(b['pr']));
+      _expenses = e.where((x) => x['m'] == cur).fold<int>(0, (a, b) => a + _toInt(b['a']));
+    });
   }
   @override void initState() { super.initState(); _load(); }
   Future<void> _addExpense() async {
     final c = TextEditingController();
-    final v = await showDialog<String>(context: context, builder: (_) => AlertDialog(title: Text(widget.ar ? 'اضافة مصروف' : 'Add Expense'), content: TextField(controller: c, keyboardType: TextInputType.number), actions: [TextButton(onPressed: () => Navigator.pop(context, c.text), child: Text(widget.ar ? 'حفظ' : 'Save'))]));
-    if (v != null && v.isNotEmpty) {
-      final sp = await SharedPreferences.getInstance();
-      final today = DateTime.now().toIso8601String().substring(0, 10);
-      await sp.setInt('expenses_${today}', _expenses + (int.tryParse(v) ?? 0));
+    final n = TextEditingController();
+    final v = await showDialog<bool>(context: context, builder: (_) => AlertDialog(title: Text(widget.ar ? 'اضافة مصروف' : 'Add Expense'), content: Column(mainAxisSize: MainAxisSize.min, children: [TextField(controller: c, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: widget.ar ? 'المبلغ' : 'Amount')), const SizedBox(height: 8), TextField(controller: n, decoration: InputDecoration(labelText: widget.ar ? 'ملاحظة' : 'Note'))]), actions: [TextButton(onPressed: () => Navigator.pop(context, false), child: Text(widget.ar ? 'الغاء' : 'Cancel')), TextButton(onPressed: () => Navigator.pop(context, true), child: Text(widget.ar ? 'حفظ' : 'Save'))]));
+    if (v == true) {
+      final amt = int.tryParse(c.text) ?? 0;
+      if (amt > 0) await saveMonthlyExpense(amt, n.text);
       _load();
     }
   }
   Future<void> _reset() async {
     final sp = await SharedPreferences.getInstance();
+    final cur = monthKeyOf(DateTime.now());
+    final s = await loadAllSales();
+    final e = await loadAllExpenses();
+    final newS = s.where((x) => x['m'] != cur).toList();
+    final newE = e.where((x) => x['m'] != cur).toList();
+    await sp.setString('sales_all', jsonEncode(newS));
+    await sp.setString('expenses_all', jsonEncode(newE));
     final today = DateTime.now().toIso8601String().substring(0, 10);
     await sp.setInt('expenses_${today}', 0);
     await sp.setInt('sales_${today}_count', 0);
@@ -696,7 +862,7 @@ class _AccountTabState extends State<AccountTab> {
       const SizedBox(height: 12),
       SizedBox(width: double.infinity, height: 48, child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: petrol), onPressed: _addExpense, child: Text(widget.ar ? 'اضافة مصروف' : 'Add Expense', style: const TextStyle(color: Colors.white)))),
       const SizedBox(height: 8),
-      SizedBox(width: double.infinity, height: 48, child: OutlinedButton(onPressed: _reset, child: Text(widget.ar ? 'تصفير' : 'Reset'))),
+      SizedBox(width: double.infinity, height: 48, child: OutlinedButton(onPressed: _reset, child: Text(widget.ar ? 'تصفير الشهر الحالي فقط' : 'Reset Current Month Only'))),
     ]));
   }
 }
