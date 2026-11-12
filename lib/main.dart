@@ -54,7 +54,14 @@ int parseTime(String s) {
   return total;
 }
 
-// ---------- Monthly Sales Helpers - جديد: المبيعات بتتجمع طول الشهر ----------
+int _toInt(dynamic v) {
+  if (v is int) return v;
+  if (v is double) return v.toInt();
+  if (v is String) return int.tryParse(v) ?? 0;
+  if (v is num) return v.toInt();
+  return 0;
+}
+
 String monthKeyOf(DateTime d) => '${d.year}-${d.month.toString().padLeft(2, '0')}';
 String monthLabel(String k) {
   final p = k.split('-');
@@ -66,22 +73,21 @@ String monthLabel(String k) {
 Future<void> saveMonthlySale(String profile, int count) async {
   final sp = await SharedPreferences.getInstance();
   final month = monthKeyOf(DateTime.now());
-  // sales_all: List of {m, p, price, date}
   List<Map<String, dynamic>> all = [];
   final raw = sp.getString('sales_all');
   if (raw != null && raw.isNotEmpty) {
     try { all = List<Map<String, dynamic>>.from(jsonDecode(raw)); } catch (_) {}
   }
+  final price = _toInt(profile);
   for (int i = 0; i < count; i++) {
-    all.add({'m': month, 'p': profile, 'pr': int.tryParse(profile) ?? 0, 'd': DateTime.now().millisecondsSinceEpoch});
+    all.add({'m': month, 'p': profile, 'pr': price, 'd': DateTime.now().millisecondsSinceEpoch});
   }
   await sp.setString('sales_all', jsonEncode(all));
-  // keep old today keys for backward compatibility
   final today = DateTime.now().toIso8601String().substring(0, 10);
   final oldCount = sp.getInt('sales_${today}_count') ?? 0;
   final oldSum = sp.getInt('sales_${today}_sum') ?? 0;
   await sp.setInt('sales_${today}_count', oldCount + count);
-  await sp.setInt('sales_${today}_sum', oldSum + (int.parse(profile) * count));
+  await sp.setInt('sales_${today}_sum', oldSum + (price * count));
 }
 
 Future<List<Map<String, dynamic>>> loadAllSales() async {
@@ -117,20 +123,28 @@ class MikroTikApi {
   Socket? _socket;
   List<int> _buf = [];
   Future<List<Map<String,String>>> run(String host, String user, String pass, String cmd, [List<String> args = const []]) async {
-    _socket = await Socket.connect(host, 8728, timeout: const Duration(seconds: 5));
-    _socket!.listen((d) { _buf.addAll(d); });
-    final chalHex = await _loginStep(user);
-    List<int> hexToBytes(String hex) {
-      final out = <int>[];
-      for (int i = 0; i < hex.length; i += 2) out.add(int.parse(hex.substring(i, i + 2), radix: 16));
-      return out;
+    _buf = [];
+    try {
+      _socket = await Socket.connect(host, 8728, timeout: const Duration(seconds: 5));
+      _socket!.listen((d) { _buf.addAll(d); });
+      final chalHex = await _loginStep(user);
+      List<int> hexToBytes(String hex) {
+        final out = <int>[];
+        for (int i = 0; i < hex.length; i += 2) out.add(int.parse(hex.substring(i, i + 2), radix: 16));
+        return out;
+      }
+      final respHash = md5.convert([0, ...utf8.encode(pass), ...hexToBytes(chalHex)]).toString();
+      await _send(['/login', '=name=$user', '=response=00$respHash']);
+      final loginRes = await _readSentence();
+      if (loginRes.any((m) => m['__type__'] == '!trap')) throw Exception('login failed');
+      await _send([cmd, ...args]);
+      final result = await _readAll();
+      return result;
+    } finally {
+      try { await _socket?.close(); } catch (_) {}
+      _socket = null;
+      _buf = [];
     }
-    final respHash = md5.convert([0, ...utf8.encode(pass), ...hexToBytes(chalHex)]).toString();
-    await _send(['/login', '=name=$user', '=response=00$respHash']);
-    final loginRes = await _readSentence();
-    if (loginRes.any((m) => m['__type__'] == '!trap')) throw Exception('login failed');
-    await _send([cmd, ...args]);
-    return _readAll();
   }
   Future<String> _loginStep(String user) async {
     await _send(['/login', '=name=$user']);
@@ -398,11 +412,9 @@ class _HomeTabState extends State<HomeTab> {
 
   @override void initState() {
     super.initState();
-    // جديد: اتصال تلقائي بالطابعة أول ما تفتح التطبيق
     Future.delayed(const Duration(milliseconds: 500), _autoConnectPrinter);
   }
 
-  // جديد: اتصال تلقائي - يدور على RazyTech-5890IV أو آخر طابعة محفوظة
   Future<void> _autoConnectPrinter() async {
     if (_autoTried) return;
     _autoTried = true;
@@ -419,17 +431,11 @@ class _HomeTabState extends State<HomeTab> {
       BluetoothDevice? target;
       for (final d in bonded) {
         final n = (d.name ?? '').toLowerCase();
-        if (d.address == savedMac) { target = d; break; }
-        if (n.contains('razytech') || n.contains('5890') || n == savedName.toLowerCase()) { target = d; break; }
+        if (savedMac.isNotEmpty && d.address == savedMac) { target = d; break; }
+        if (n.contains('razytech') || n.contains('5890') || (savedName.isNotEmpty && n == savedName.toLowerCase())) { target = d; break; }
       }
-      if (target == null) {
-        // لو مفيش RazyTech، خد أول طابعة مقترنة لو فيه واحدة بس محفوظة قبل كده
-        if (savedMac.isNotEmpty && bonded.isNotEmpty) {
-          for (final d in bonded) { if (d.address == savedMac) target = d; }
-        }
-        if (target == null) return;
-      }
-      if (_bt != null && (_bt!.isConnected)) return;
+      if (target == null) return;
+      if (_bt != null && _bt!.isConnected) return;
       for (int i = 0; i < 2; i++) {
         try {
           try { _bt?.close(); } catch (_) {}
@@ -441,4 +447,420 @@ class _HomeTabState extends State<HomeTab> {
         await sp.setString('saved_printer_mac', target.address);
         await sp.setString('saved_printer_name', target.name ?? 'Printer');
         if (!mounted) return;
-        setState(() => _printer = 
+        setState(() => _printer = target!.name ?? 'Printer');
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _pickPrinter() async {
+    await Permission.bluetoothConnect.request();
+    await Permission.bluetoothScan.request();
+    await Permission.locationWhenInUse.request();
+    await Permission.bluetoothAdvertise.request();
+    try {
+      final enabled = await FlutterBluetoothSerial.instance.isEnabled ?? false;
+      if (!enabled) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(widget.ar ? 'شغل البلوتوث الأول' : 'Turn Bluetooth on'))); return; }
+      final bonded = await FlutterBluetoothSerial.instance.getBondedDevices();
+      if (!mounted) return;
+      if (bonded.isEmpty) { ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(widget.ar ? 'لا توجد طابعة مقترنة - اقترن من إعدادات الموبايل الأول' : 'No paired printer'))); return; }
+      showModalBottomSheet(context: context, builder: (_) => ListView(children: bonded.map((d) => ListTile(
+        title: Text(d.name ?? 'Printer'),
+        subtitle: Text(d.address),
+        onTap: () async {
+          Navigator.pop(context);
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${widget.ar ? 'جارٍ الاتصال بـ' : 'Connecting to'} ${d.name}...')));
+          bool ok = false;
+          for (int i = 0; i < 2 && !ok; i++) {
+            try { try { _bt?.close(); } catch (_) {} _bt = await BluetoothConnection.toAddress(d.address); ok = _bt?.isConnected ?? false; } catch (_) { ok = false; await Future.delayed(const Duration(milliseconds: 1000)); }
+          }
+          if (ok) { final sp = await SharedPreferences.getInstance(); await sp.setString('saved_printer_mac', d.address); await sp.setString('saved_printer_name', d.name ?? 'Printer'); }
+          if (!mounted) return;
+          setState(() => _printer = ok ? (d.name ?? 'Printer') : 'غير متصلة');
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(ok ? (widget.ar ? 'تم الاتصال بالطابعة' : 'Printer connected') : (widget.ar ? 'تعذر الاتصال بالطابعة' : 'Cannot connect'))));
+        },
+      )).toList()));
+    } catch (e) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${widget.ar ? 'خطأ الطابعة' : 'Printer error'}: $e'))); }
+  }
+  Future<void> _create() async {
+    setState(() { _busy = true; _msg = ''; _created = []; });
+    try {
+      final rnd = Random();
+      final names = <String>[];
+      for (int i = 0; i < _count; i++) { names.add('${1000000 + rnd.nextInt(9000000)}'); }
+      final todayStr = DateTime.now().toIso8601String().substring(0, 10);
+      for (final name in names) {
+        final res = await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/user/add', ['=name=$name', '=password=', '=profile=$_profile', '=server=all', '=comment=created:$todayStr']);
+        if (res.any((m) => m['__type__'] == '!trap')) throw Exception('create failed');
+        final check = await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/user/print');
+        final found = check.where((m) => m['name'] == name).toList();
+        if (found.isEmpty) throw Exception('not found');
+        final id = found.first['.id'] ?? '';
+        if (id.isNotEmpty) { await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/user/set', ['=numbers=$id', '=limit-uptime=${daysForProfile(_profile)}d', '=limit-bytes-total=${bytesFor(_profile)}']); }
+      }
+      await saveMonthlySale(_profile, names.length);
+      setState(() { _created = names; _msg = widget.ar ? 'تم إنشاء $_count كارت بنجاح' : 'Created $_count cards successfully'; });
+    } catch (_) { setState(() => _msg = widget.ar ? 'تعذر إنشاء الكارت' : 'Cannot create card'); }
+    setState(() => _busy = false);
+  }
+  Future<void> _print() async {
+    if (_created.isEmpty) { setState(() => _msg = widget.ar ? 'أنشئ كارت أولاً' : 'Create a card first'); return; }
+    if (_bt == null || !(_bt?.isConnected ?? false)) {
+      setState(() => _msg = widget.ar ? 'جارٍ الاتصال بالطابعة أوتوماتيك...' : 'Auto-connecting printer...');
+      _autoTried = false;
+      await _autoConnectPrinter();
+      if (_bt == null || !(_bt?.isConnected ?? false)) { setState(() => _msg = widget.ar ? 'اختر الطابعة أولاً' : 'Choose printer first'); return; }
+    }
+    try {
+      for (final num in _created) {
+        final recorder = ui.PictureRecorder();
+        final canvas = ui.Canvas(recorder, ui.Rect.fromLTWH(0, 0, 384, 220));
+        canvas.drawRect(ui.Rect.fromLTWH(0, 0, 384, 220), ui.Paint()..color = const Color(0xFFFFFFFF));
+        void drawText(String text, double y, double size, bool bold) {
+          final builder = ui.ParagraphBuilder(ui.ParagraphStyle(textAlign: ui.TextAlign.center, fontSize: size, fontWeight: bold ? ui.FontWeight.bold : ui.FontWeight.normal, textDirection: ui.TextDirection.ltr));
+          builder.pushStyle(ui.TextStyle(color: const Color(0xFF000000), fontSize: size, fontWeight: bold ? ui.FontWeight.bold : ui.FontWeight.normal));
+          builder.addText(text);
+          builder.pop();
+          final p = builder.build()..layout(ui.ParagraphConstraints(width: 384));
+          canvas.drawParagraph(p, ui.Offset(0, y));
+        }
+        drawText('FAZLAKA', 10, 42, true);
+        drawText('01016620065 - 01141418040', 70, 22, false);
+        drawText('------------------------------', 105, 22, false);
+        drawText(num, 130, 58, true);
+        drawText('Price: $_profile | Quota: ${quotaFor(_profile)}GB', 195, 22, false);
+        final pic = recorder.endRecording();
+        final img = await pic.toImage(384, 220);
+        final byteData = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
+        final rgba = byteData!.buffer.asUint8List();
+        final mono = <int>[];
+        for (int y = 0; y < 220; y++) {
+          for (int x = 0; x < 384; x += 8) {
+            int b = 0;
+            for (int bit = 0; bit < 8; bit++) {
+              final idx = (y * 384 + x + bit) * 4;
+              final r = rgba[idx];
+              final g = rgba[idx + 1];
+              final bl = rgba[idx + 2];
+              final gray = (r + g + bl) ~/ 3;
+              if (gray < 150) b |= (0x80 >> bit);
+            }
+            mono.add(b);
+          }
+        }
+        final bytes = <int>[];
+        bytes.addAll([0x1B, 0x40]);
+        bytes.addAll([0x1B, 0x61, 0x01]);
+        bytes.addAll([0x1D, 0x76, 0x30, 0x00, 48, 0, 220, 0]);
+        bytes.addAll(mono);
+        bytes.addAll([0x0A, 0x0A, 0x0A]);
+        bytes.addAll([0x1D, 0x56, 0x00]);
+        _bt!.output.add(Uint8List.fromList(bytes));
+        await _bt!.output.allSent;
+        await Future.delayed(const Duration(milliseconds: 800));
+      }
+      setState(() => _msg = widget.ar ? 'تمت الطباعة' : 'Printed');
+    } catch (_) { setState(() => _msg = widget.ar ? 'تعذر الطباعة' : 'Cannot print'); }
+  }
+  @override void dispose() { try { _bt?.close(); } catch (_) {} super.dispose(); }
+  @override Widget build(BuildContext context) {
+    return SingleChildScrollView(padding: const EdgeInsets.all(16), child: Column(children: [
+      Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20)), child: Column(children: [
+        Align(alignment: Alignment.centerRight, child: Text(widget.ar ? 'انشاء كروت' : 'Create Cards', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: petrol))),
+        const SizedBox(height: 16),
+        Row(children: ['20','50'].map((p) => Expanded(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 4), child: GestureDetector(onTap: () => setState(() => _profile = p), child: Container(height: 58, decoration: BoxDecoration(color: _profile == p ? petrol : const Color(0xFFEDEDED), borderRadius: BorderRadius.circular(14)), alignment: Alignment.center, child: Text(p, style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: _profile == p ? Colors.white : Colors.black))))))).toList()),
+        const SizedBox(height: 8),
+        Row(children: ['100','200'].map((p) => Expanded(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 4), child: GestureDetector(onTap: () => setState(() => _profile = p), child: Container(height: 58, decoration: BoxDecoration(color: _profile == p ? petrol : const Color(0xFFEDEDED), borderRadius: BorderRadius.circular(14)), alignment: Alignment.center, child: Text(p, style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: _profile == p ? Colors.white : Colors.black))))))).toList()),
+        const SizedBox(height: 8),
+        Text(widget.ar ? '${quotaFor(_profile)} جيجا - ${daysForProfile(_profile)} يوم' : '${quotaFor(_profile)}GB - ${daysForProfile(_profile)} days', style: const TextStyle(fontWeight: FontWeight.bold, color: petrol)),
+        const SizedBox(height: 8),
+        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+          Text(widget.ar ? 'عدد الكروت' : 'Count', style: const TextStyle(fontSize: 16)),
+          Row(children: [
+            IconButton(onPressed: () => setState(() => _count++), icon: const Icon(Icons.add)),
+            Text('$_count', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+            IconButton(onPressed: () { if (_count > 1) setState(() => _count--); }, icon: const Icon(Icons.remove)),
+          ]),
+        ]),
+      ])),
+      const SizedBox(height: 16),
+      SizedBox(width: double.infinity, height: 52, child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: petrol, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))), onPressed: _busy ? null : _create, child: Text(widget.ar ? 'انشاء' : 'Create', style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)))),
+      const SizedBox(height: 12),
+      SizedBox(width: double.infinity, height: 52, child: OutlinedButton(style: OutlinedButton.styleFrom(side: const BorderSide(color: petrol), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))), onPressed: _print, child: Text(widget.ar ? 'طباعة' : 'Print', style: const TextStyle(color: petrol, fontSize: 18, fontWeight: FontWeight.bold)))),
+      const SizedBox(height: 12),
+      SizedBox(width: double.infinity, height: 52, child: ElevatedButton.icon(style: ElevatedButton.styleFrom(backgroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: const BorderSide(color: petrol))), onPressed: _pickPrinter, icon: const Icon(Icons.bluetooth, color: petrol), label: Text(_printer == 'غير متصلة' ? (widget.ar ? 'توصيل الطابعة - أوتوماتيك' : 'Connect Printer - Auto') : '${widget.ar ? 'الطابعة' : 'Printer'}: $_printer', style: const TextStyle(color: petrol, fontSize: 16, fontWeight: FontWeight.bold)))),
+      const SizedBox(height: 6),
+      Text(widget.ar ? 'الطابعة بتتصل أوتوماتيك أول ما تفتح التطبيق' : 'Printer auto-connects on open', style: const TextStyle(fontSize: 11, color: Colors.grey)),
+      const SizedBox(height: 12),
+      if (_msg.isNotEmpty) Text(_msg, style: const TextStyle(fontWeight: FontWeight.bold)),
+      if (_created.isNotEmpty) ...[
+        const SizedBox(height: 12),
+        Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20)), child: Column(children: [
+          Align(alignment: Alignment.centerRight, child: Text(widget.ar ? 'الكروت الجاهزة' : 'Ready Cards', style: const TextStyle(fontWeight: FontWeight.bold))),
+          const SizedBox(height: 8),
+          ..._created.map((c) => Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: Column(children: [
+            const Text('FAZLAKA', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, letterSpacing: 3)),
+            const Text('01016620065 - 01141418040'),
+            const Text('------------------------------'),
+            Text(c, style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold)),
+            Text('Price: $_profile | Quota: ${quotaFor(_profile)}GB'),
+          ]))),
+        ])),
+      ],
+    ]));
+  }
+}
+
+class CardsTab extends StatefulWidget {
+  final bool ar; final String host, user, pass;
+  const CardsTab({super.key, required this.ar, required this.host, required this.user, required this.pass});
+  @override State<CardsTab> createState() => _CardsTabState();
+}
+class _CardsTabState extends State<CardsTab> {
+  bool _showActive = true;
+  List<Map<String,String>> _active = [], _all = [];
+  bool _loading = false;
+  String _status = '';
+  String _delMsg = '';
+  String _search = '';
+  final _searchCtrl = TextEditingController();
+  Future<void> _load() async {
+    setState(() { _loading = true; });
+    try {
+      final disabled = await disableExpiredUsers(widget.host, widget.user, widget.pass);
+      if (disabled > 0) setState(() => _delMsg = widget.ar ? 'تم تعطيل $disabled يوزر منتهي أوتوماتيك' : 'Disabled $disabled expired users');
+      final a = await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/active/print');
+      final u = await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/user/print');
+      setState(() { _active = a; _all = u; _status = widget.ar ? 'متصل' : 'Connected'; });
+    } catch (_) { setState(() => _status = widget.ar ? 'غير متصل' : 'Disconnected'); }
+    setState(() => _loading = false);
+  }
+  List<Map<String,String>> get _filteredActive {
+    if (_search.trim().isEmpty) return _active;
+    final q = _search.trim().toLowerCase();
+    return _active.where((m) => (m['user'] ?? '').toLowerCase().contains(q) || (m['address'] ?? '').toLowerCase().contains(q) || (m['mac-address'] ?? '').toLowerCase().contains(q)).toList();
+  }
+  List<Map<String,String>> get _filteredAll {
+    if (_search.trim().isEmpty) return _all;
+    final q = _search.trim().toLowerCase();
+    return _all.where((m) => (m['name'] ?? '').toLowerCase().contains(q) || (m['profile'] ?? '').toLowerCase().contains(q) || (m['comment'] ?? '').toLowerCase().contains(q)).toList();
+  }
+  Future<void> _kickActive(String id, String name) async {
+    final confirm = await showDialog<String>(context: context, builder: (_) => AlertDialog(
+      title: Text(widget.ar ? 'اخراج $name ؟' : 'Kick $name ?'),
+      content: Text(widget.ar ? 'تختار ايه؟' : 'Choose:'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context, 'cancel'), child: Text(widget.ar ? 'الغاء' : 'Cancel')),
+        TextButton(onPressed: () => Navigator.pop(context, 'kick'), child: Text(widget.ar ? 'اخراج بس' : 'Kick only', style: const TextStyle(color: Colors.orange))),
+        TextButton(onPressed: () => Navigator.pop(context, 'kick_disable'), child: Text(widget.ar ? 'اخراج + تعطيل' : 'Kick + Disable', style: const TextStyle(color: Colors.red))),
+      ],
+    ));
+    if (confirm == null || confirm == 'cancel') return;
+    try {
+      await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/active/remove', ['=numbers=$id']);
+      if (confirm == 'kick_disable') {
+        final users = await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/user/print');
+        final found = users.where((m) => m['name'] == name).toList();
+        if (found.isNotEmpty) {
+          final uid = found.first['.id'] ?? '';
+          if (uid.isNotEmpty) await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/user/set', ['=numbers=$uid', '=disabled=yes']);
+        }
+      }
+      setState(() => _delMsg = widget.ar ? 'تم اخراج $name' : 'Kicked $name');
+      _load();
+    } catch (_) { setState(() => _delMsg = widget.ar ? 'تعذر الاخراج' : 'Cannot kick'); }
+  }
+  Future<void> _kickAll() async {
+    final confirm = await showDialog<bool>(context: context, builder: (_) => AlertDialog(title: Text(widget.ar ? 'اخراج الكل؟' : 'Kick all?'), content: Text(widget.ar ? 'هتخرج كل المتصلين دلوقتي، متأكد؟' : 'Kick all active users?'), actions: [TextButton(onPressed: () => Navigator.pop(context, false), child: Text(widget.ar ? 'لا' : 'No')), TextButton(onPressed: () => Navigator.pop(context, true), child: Text(widget.ar ? 'نعم اخرج الكل' : 'Yes kick all'))]));
+    if (confirm != true) return;
+    for (final m in _active) {
+      final id = m['.id'] ?? '';
+      if (id.isNotEmpty) { try { await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/active/remove', ['=numbers=$id']); } catch (_) {} }
+    }
+    setState(() => _delMsg = widget.ar ? 'تم اخراج الكل' : 'Kicked all');
+    _load();
+  }
+  Future<void> _manualDelete() async {
+    final confirm = await showDialog<bool>(context: context, builder: (_) => AlertDialog(title: Text(widget.ar ? 'حذف المنتهية؟' : 'Delete expired?'), content: Text(widget.ar ? 'هيمسح كل اليوزرات المعطلة، متأكد؟' : 'Delete all disabled users?'), actions: [TextButton(onPressed: () => Navigator.pop(context, false), child: Text(widget.ar ? 'لا' : 'No')), TextButton(onPressed: () => Navigator.pop(context, true), child: Text(widget.ar ? 'نعم احذف' : 'Yes delete'))]));
+    if (confirm != true) return;
+    setState(() => _delMsg = widget.ar ? 'جارٍ الحذف...' : 'Deleting...');
+    final d = await deleteDisabledUsers(widget.host, widget.user, widget.pass);
+    setState(() => _delMsg = widget.ar ? 'تم حذف $d يوزر' : 'Deleted $d users');
+    _load();
+  }
+  Future<void> _enableUser(String id, String name) async {
+    try {
+      await MikroTikApi().run(widget.host, widget.user, widget.pass, '/ip/hotspot/user/set', ['=numbers=$id', '=disabled=no']);
+      setState(() => _delMsg = widget.ar ? 'تم تفعيل $name' : 'Enabled $name');
+      _load();
+    } catch (_) {}
+  }
+  @override void initState() { super.initState(); _load(); }
+  @override void dispose() { _searchCtrl.dispose(); super.dispose(); }
+  @override Widget build(BuildContext context) {
+    return SingleChildScrollView(padding: const EdgeInsets.all(16), child: Column(children: [
+      Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20)), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+        Text(widget.ar ? 'حالة الراوتر' : 'Router', style: const TextStyle(fontWeight: FontWeight.bold)),
+        Text('${widget.ar ? 'حالة الراوتر -' : 'Router -'} $_status'),
+      ])),
+      const SizedBox(height: 12),
+      Row(children: [
+        Expanded(child: SizedBox(height: 48, child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.orange, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))), onPressed: _kickAll, child: Text(widget.ar ? 'اخراج الكل' : 'Kick All', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold))))),
+        const SizedBox(width: 8),
+        Expanded(child: SizedBox(height: 48, child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))), onPressed: _manualDelete, child: Text(widget.ar ? 'حذف المنتهية' : 'Delete Expired', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold))))),
+      ]),
+      if (_delMsg.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 8), child: Text(_delMsg, style: const TextStyle(fontWeight: FontWeight.bold, color: petrol))),
+      const SizedBox(height: 12),
+      Row(children: [
+        Expanded(child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: _showActive ? petrol : Colors.white), onPressed: () { setState(() { _showActive = true; _search = ''; _searchCtrl.clear(); }); }, child: Text(widget.ar ? 'المتصلين الآن' : 'Online', style: TextStyle(color: _showActive ? Colors.white : petrol)))),
+        const SizedBox(width: 8),
+        Expanded(child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: !_showActive ? petrol : Colors.white), onPressed: () { setState(() { _showActive = false; _search = ''; _searchCtrl.clear(); }); }, child: Text(widget.ar ? 'كل الكروت' : 'All Cards', style: TextStyle(color: !_showActive ? Colors.white : petrol)))),
+      ]),
+      const SizedBox(height: 12),
+      TextField(
+        controller: _searchCtrl,
+        onChanged: (v) => setState(() => _search = v),
+        decoration: InputDecoration(
+          hintText: _showActive ? (widget.ar ? 'بحث في المتصلين - رقم أو IP' : 'Search active - number or IP') : (widget.ar ? 'بحث في الكروت - رقم أو بروفايل' : 'Search cards - number or profile'),
+          prefixIcon: const Icon(Icons.search, color: petrol),
+          suffixIcon: _search.isNotEmpty ? IconButton(icon: const Icon(Icons.clear), onPressed: () { setState(() { _search = ''; _searchCtrl.clear(); }); }) : null,
+          filled: true, fillColor: Colors.white,
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none),
+        ),
+      ),
+      const SizedBox(height: 8),
+      Text(widget.ar ? 'النشط: ${_active.length} | الكروت: ${_all.length} | النتيجة: ${_showActive ? _filteredActive.length : _filteredAll.length}' : 'Active: ${_active.length} | Cards: ${_all.length} | Found: ${_showActive ? _filteredActive.length : _filteredAll.length}'),
+      const SizedBox(height: 12),
+      if (_loading) const CircularProgressIndicator(),
+      if (!_loading && _showActive) ..._filteredActive.map((m) {
+        final name = m['user'] ?? '';
+        final id = m['.id'] ?? '';
+        return Card(child: ListTile(
+          title: Text('$name - ${widget.ar ? 'نشط' : 'Active'}'),
+          subtitle: Text('${m['address'] ?? ''} - ${m['uptime'] ?? ''}'),
+          trailing: IconButton(icon: const Icon(Icons.logout, color: Colors.red), tooltip: widget.ar ? 'اخراج' : 'Kick', onPressed: () => _kickActive(id, name)),
+        ));
+      }),
+      if (!_loading && !_showActive) ..._filteredAll.map((m) {
+        final isDis = (m['disabled'] ?? 'false') == 'true';
+        final left = remainingDays(m);
+        return Card(child: ListTile(
+          title: Text(m['name'] ?? ''),
+          subtitle: Text('${m['profile'] ?? ''} - ${isDis ? (widget.ar ? 'معطل' : 'Disabled') : (widget.ar ? 'شغال - باقي $left يوم' : 'Active - $left days left')}'),
+          trailing: isDis ? IconButton(icon: const Icon(Icons.check_circle, color: Colors.green), tooltip: widget.ar ? 'تفعيل' : 'Enable', onPressed: () => _enableUser(m['.id'] ?? '', m['name'] ?? '')) : null,
+        ));
+      }),
+      if (!_loading && _showActive && _filteredActive.isEmpty) Padding(padding: const EdgeInsets.only(top: 20), child: Text(widget.ar ? 'مفيش نتيجة' : 'No results')),
+      if (!_loading && !_showActive && _filteredAll.isEmpty) Padding(padding: const EdgeInsets.only(top: 20), child: Text(widget.ar ? 'مفيش نتيجة' : 'No results')),
+    ]));
+  }
+}
+
+class SalesTab extends StatefulWidget { final bool ar; const SalesTab({super.key, required this.ar}); @override State<SalesTab> createState() => _SalesTabState(); }
+class _SalesTabState extends State<SalesTab> {
+  List<Map<String, dynamic>> _sales = [];
+  List<Map<String, dynamic>> _expenses = [];
+  @override void initState() { super.initState(); _load(); }
+  Future<void> _load() async {
+    final s = await loadAllSales();
+    final e = await loadAllExpenses();
+    setState(() { _sales = s; _expenses = e; });
+  }
+  @override Widget build(BuildContext context) {
+    final cur = monthKeyOf(DateTime.now());
+    final curSales = _sales.where((e) => e['m'] == cur).toList();
+    final curExp = _expenses.where((e) => e['m'] == cur).toList();
+    final curTotal = curSales.fold<int>(0, (a, b) => a + _toInt(b['pr']));
+    final curExpTotal = curExp.fold<int>(0, (a, b) => a + _toInt(b['a']));
+    final curNet = curTotal - curExpTotal;
+    final months = {..._sales.map((e) => e['m'].toString()), ..._expenses.map((e) => e['m'].toString())}.toList()..sort((a, b) => b.compareTo(a));
+    if (months.isEmpty) months.add(cur);
+    return SingleChildScrollView(padding: const EdgeInsets.all(16), child: Column(children: [
+      Container(width: double.infinity, padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20)), child: Column(children: [
+        Text(widget.ar ? 'مبيعات ${monthLabel(cur)}' : 'Sales ${monthLabel(cur)}', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 12),
+        Text('${curSales.length} ${widget.ar ? 'كارت' : 'cards'}', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+        Text('$curTotal ${widget.ar ? 'جنيه مبيعات' : 'EGP sales'}', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: petrol)),
+        Text('$curExpTotal ${widget.ar ? 'جنيه مصاريف' : 'EGP expenses'}', style: const TextStyle(fontSize: 16)),
+        Text('${widget.ar ? 'الصافي' : 'Net'}: $curNet', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: curNet >= 0 ? Colors.green : Colors.red)),
+        const SizedBox(height: 8),
+        Text(widget.ar ? 'كروت: 20=${curSales.where((e) => e['p'] == '20').length} | 50=${curSales.where((e) => e['p'] == '50').length} | 100=${curSales.where((e) => e['p'] == '100').length} | 200=${curSales.where((e) => e['p'] == '200').length}' : 'Cards: 20=${curSales.where((e) => e['p'] == '20').length} | 50=${curSales.where((e) => e['p'] == '50').length} | 100=${curSales.where((e) => e['p'] == '100').length} | 200=${curSales.where((e) => e['p'] == '200').length}'),
+      ])),
+      const SizedBox(height: 16),
+      Align(alignment: Alignment.centerRight, child: Text(widget.ar ? 'تقارير الشهور - مكسب / خسارة' : 'Monthly Reports - Profit / Loss', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: petrol))),
+      const SizedBox(height: 10),
+      ...months.map((m) {
+        final ms = _sales.where((e) => e['m'] == m).toList();
+        final me = _expenses.where((e) => e['m'] == m).toList();
+        final tot = ms.fold<int>(0, (a, b) => a + _toInt(b['pr']));
+        final exp = me.fold<int>(0, (a, b) => a + _toInt(b['a']));
+        final net = tot - exp;
+        return Container(margin: const EdgeInsets.only(bottom: 10), padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            Text(monthLabel(m), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            Container(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5), decoration: BoxDecoration(color: net >= 0 ? Colors.green : Colors.red, borderRadius: BorderRadius.circular(20)), child: Text(net >= 0 ? '${widget.ar ? 'مكسب' : 'Profit'} $net ج' : '${widget.ar ? 'خسارة' : 'Loss'} ${-net} ج', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold))),
+          ]),
+          const SizedBox(height: 8),
+          Text(widget.ar ? 'كروت: 20=${ms.where((e) => e['p'] == '20').length} | 50=${ms.where((e) => e['p'] == '50').length} | 100=${ms.where((e) => e['p'] == '100').length} | 200=${ms.where((e) => e['p'] == '200').length}' : 'Cards: 20=${ms.where((e) => e['p'] == '20').length} | 50=${ms.where((e) => e['p'] == '50').length} | 100=${ms.where((e) => e['p'] == '100').length} | 200=${ms.where((e) => e['p'] == '200').length}'),
+          Text('${widget.ar ? 'المبيعات' : 'Sales'}: $tot ج - ${widget.ar ? 'المصاريف' : 'Expenses'}: $exp ج'),
+        ]));
+      }),
+      const SizedBox(height: 8),
+      Text(widget.ar ? 'المبيعات بتتجمع طول الشهر، والشهر الجديد بيبدأ صفر، والقديم بيفضل هنا.' : 'Sales accumulate all month, new month starts at 0, old stays here.', style: const TextStyle(color: Colors.grey, fontSize: 12)),
+    ]));
+  }
+}
+
+class AccountTab extends StatefulWidget { final bool ar; const AccountTab({super.key, required this.ar}); @override State<AccountTab> createState() => _AccountTabState(); }
+class _AccountTabState extends State<AccountTab> {
+  int _sales = 0, _expenses = 0;
+  Future<void> _load() async {
+    final s = await loadAllSales();
+    final e = await loadAllExpenses();
+    final cur = monthKeyOf(DateTime.now());
+    setState(() {
+      _sales = s.where((x) => x['m'] == cur).fold<int>(0, (a, b) => a + _toInt(b['pr']));
+      _expenses = e.where((x) => x['m'] == cur).fold<int>(0, (a, b) => a + _toInt(b['a']));
+    });
+  }
+  @override void initState() { super.initState(); _load(); }
+  Future<void> _addExpense() async {
+    final c = TextEditingController();
+    final n = TextEditingController();
+    final v = await showDialog<bool>(context: context, builder: (_) => AlertDialog(title: Text(widget.ar ? 'اضافة مصروف' : 'Add Expense'), content: Column(mainAxisSize: MainAxisSize.min, children: [TextField(controller: c, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: widget.ar ? 'المبلغ' : 'Amount')), const SizedBox(height: 8), TextField(controller: n, decoration: InputDecoration(labelText: widget.ar ? 'ملاحظة' : 'Note'))]), actions: [TextButton(onPressed: () => Navigator.pop(context, false), child: Text(widget.ar ? 'الغاء' : 'Cancel')), TextButton(onPressed: () => Navigator.pop(context, true), child: Text(widget.ar ? 'حفظ' : 'Save'))]));
+    if (v == true) {
+      final amt = int.tryParse(c.text) ?? 0;
+      if (amt > 0) await saveMonthlyExpense(amt, n.text);
+      _load();
+    }
+  }
+  Future<void> _reset() async {
+    final sp = await SharedPreferences.getInstance();
+    final cur = monthKeyOf(DateTime.now());
+    final s = await loadAllSales();
+    final e = await loadAllExpenses();
+    final newS = s.where((x) => x['m'] != cur).toList();
+    final newE = e.where((x) => x['m'] != cur).toList();
+    await sp.setString('sales_all', jsonEncode(newS));
+    await sp.setString('expenses_all', jsonEncode(newE));
+    final today = DateTime.now().toIso8601String().substring(0, 10);
+    await sp.setInt('expenses_${today}', 0);
+    await sp.setInt('sales_${today}_count', 0);
+    await sp.setInt('sales_${today}_sum', 0);
+    _load();
+  }
+  @override Widget build(BuildContext context) {
+    final net = _sales - _expenses;
+    return Padding(padding: const EdgeInsets.all(16), child: Column(children: [
+      Container(width: double.infinity, padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20)), child: Column(children: [
+        Text('${widget.ar ? 'الصافي' : 'Net'}: $net', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: petrol)),
+        const SizedBox(height: 8),
+        Text('${widget.ar ? 'المصاريف' : 'Expenses'}: $_expenses'),
+        Text('${widget.ar ? 'المبيعات' : 'Sales'}: $_sales'),
+      ])),
+      const SizedBox(height: 12),
+      SizedBox(width: double.infinity, height: 48, child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: petrol), onPressed: _addExpense, child: Text(widget.ar ? 'اضافة مصروف' : 'Add Expense', style: const TextStyle(color: Colors.white)))),
+      const SizedBox(height: 8),
+      SizedBox(width: double.infinity, height: 48, child: OutlinedButton(onPressed: _reset, child: Text(widget.ar ? 'تصفير الشهر الحالي فقط' : 'Reset Current Month Only'))),
+    ]));
+  }
+}
